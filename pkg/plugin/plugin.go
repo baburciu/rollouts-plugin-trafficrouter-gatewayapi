@@ -160,6 +160,16 @@ func (r *RpcPlugin) VerifyWeight(rollout *v1alpha1.Rollout, desiredWeight int32,
 }
 
 func (r *RpcPlugin) RemoveManagedRoutes(rollout *v1alpha1.Rollout) pluginTypes.RpcError {
+	// Determine if we should remove routes based on rollout state
+	shouldRemoveAllRoutes := r.shouldRemoveAllManagedRoutes(rollout)
+
+	if !shouldRemoveAllRoutes {
+		r.LogCtx.Info("[RemoveManagedRoutes] PRESERVING header routes during canary progression")
+		return pluginTypes.RpcError{}
+	}
+
+	r.LogCtx.Info("[RemoveManagedRoutes] REMOVING all managed routes due to rollout completion/failure")
+
 	gatewayAPIConfig, err := r.getGatewayAPIConfigWithDiscovery(rollout)
 	if err != nil {
 		return pluginTypes.RpcError{
@@ -203,6 +213,45 @@ func (r *RpcPlugin) RemoveManagedRoutes(rollout *v1alpha1.Rollout) pluginTypes.R
 
 func (r *RpcPlugin) Type() string {
 	return Type
+}
+
+// Helper function to determine cleanup strategy based on rollout state
+func (r *RpcPlugin) shouldRemoveAllManagedRoutes(rollout *v1alpha1.Rollout) bool {
+	r.LogCtx.Info(fmt.Sprintf("[RemoveManagedRoutes] === ANALYZING ROLLOUT STATE === rollout %s/%s, currentStep: %d, phase: %s",
+		rollout.Namespace, rollout.Name, rollout.Status.CurrentStepIndex, rollout.Status.Phase))
+
+	// Log rollout status details for analysis
+	r.LogCtx.Info(fmt.Sprintf("[RemoveManagedRoutes] rollout status - StableRS: %s, CurrentPodHash: %s, PromoteFull: %t",
+		rollout.Status.StableRS, rollout.Status.CurrentPodHash, rollout.Status.PromoteFull))
+
+	isFullyPromoted := rollout.Status.StableRS == rollout.Status.CurrentPodHash
+	isPromoteFull := rollout.Status.PromoteFull
+	r.LogCtx.Info(fmt.Sprintf("[RemoveManagedRoutes] cleanup analysis - isFullyPromoted: %t, isPromoteFull: %t",
+		isFullyPromoted, isPromoteFull))
+
+	// Remove all routes only in these scenarios:
+
+	// Scenario 1: Rollout completed successfully
+	if rollout.Status.Phase == "Healthy" && isFullyPromoted {
+		r.LogCtx.Info("[RemoveManagedRoutes] Rollout completed - will remove ALL routes")
+		return true
+	}
+
+	// Scenario 2: Rollout failed or was aborted
+	if rollout.Status.Phase == "Degraded" || rollout.Status.Phase == "Failed" {
+		r.LogCtx.Info("[RemoveManagedRoutes] Rollout failed/aborted - will remove ALL routes")
+		return true
+	}
+
+	// Scenario 3: Explicit promotion requested
+	if isPromoteFull {
+		r.LogCtx.Info("[RemoveManagedRoutes] Promotion requested - will remove ALL routes")
+		return true
+	}
+
+	// Scenario 4: Normal canary progression - preserve header routes
+	r.LogCtx.Info("[RemoveManagedRoutes] Normal progression - will PRESERVE header routes")
+	return false
 }
 
 func (r *RpcPlugin) getGatewayAPIConfigWithDiscovery(rollout *v1alpha1.Rollout) (*GatewayAPITrafficRouting, error) {
