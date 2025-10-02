@@ -3,34 +3,35 @@ apiVersion: argoproj.io/v1alpha1
 kind: Rollout
 metadata:
   name: rollouts-demo
+  namespace: default
 spec:
   replicas: 5
   strategy:
     canary:
-      canaryService: argo-rollouts-canary-service # our created canary service
-      stableService: argo-rollouts-stable-service # our created stable service
+      canaryService: argo-rollouts-canary-service
+      stableService: argo-rollouts-stable-service
       trafficRouting:
         plugins:
           argoproj-labs/gatewayAPI:
-            httpRoute: argo-rollouts-http-route # our created httproute
-            namespace: default # namespace where this rollout resides
-            useHeaderRoutes: true
+            httpRoutes:
+              - name: argo-rollouts-http-route
+                useHeaderRoutes: true
+            namespace: default
         managedRoutes:
           - name: argo-rollouts
       steps:
-        - pause: {}
-        - setCanaryScale:
-            replicas: 1
         - setHeaderRoute:
-            name: argo-rollouts
             match:
               - headerName: X-Test
                 headerValue:
                   exact: test
-        - pause: {}
-        - setHeaderRoute: # remove header route
             name: argo-rollouts
-
+        - setWeight: 50
+        - pause:
+            duration: 50m
+        - setWeight: 100
+        - setHeaderRoute:
+            name: argo-rollouts
   revisionHistoryLimit: 2
   selector:
     matchLabels:
@@ -41,20 +42,22 @@ spec:
         app: rollouts-demo
     spec:
       containers:
-        - name: rollouts-demo
-          image: argoproj/rollouts-demo:red
+        - name: http-echo
+          image: hashicorp/http-echo:1.0
+          args:
+          - "-text=Hello from $(POD_NAME)"
           ports:
             - name: http
-              containerPort: 8080
+              containerPort: 5678
               protocol: TCP
           env:
-            - name: APP_VERSION
-              value: "1.0.0"
+          - name: APP_VERSION
+            value: "1.0.0"
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
           resources:
             requests:
               memory: 32Mi
               cpu: 5m
-
-
-
-
