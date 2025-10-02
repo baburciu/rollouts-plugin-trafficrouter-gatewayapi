@@ -1,0 +1,23 @@
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: HTTPRoute
+metadata:
+  name: gw-ingress
+  namespace: default
+spec:
+  parentRefs:
+  - kind: Gateway
+    name: gw-ingress-ngf
+  hostnames:
+  - api-dev.kind-test.foo.network
+  rules:
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: parent-service
+          port: 80
+          weight: 100
+      matches:
+        - path:
+            type: PathPrefix
+            value: /

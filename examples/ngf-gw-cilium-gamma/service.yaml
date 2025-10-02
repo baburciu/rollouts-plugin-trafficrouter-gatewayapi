@@ -1,0 +1,36 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: parent-service
+  namespace: default
+spec:
+  ports:
+    - port: 80
+      targetPort: http
+  selector:
+    app: dummy
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: canary-service
+  namespace: default
+spec:
+  ports:
+    - port: 80
+      targetPort: http
+  selector:
+    app: canary-service
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stable-service
+  namespace: default
+spec:
+  ports:
+    - port: 80
+      targetPort: http
+  selector:
+    app: stable-service

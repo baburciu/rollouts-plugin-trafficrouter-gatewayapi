@@ -1,0 +1,78 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: canary-service
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: canary-service
+  template:
+    metadata:
+      labels:
+        app: canary-service
+    spec:
+      containers:
+        - name: http-echo
+          image: hashicorp/http-echo:1.0
+          args:
+          - "-text=Hello from $(POD_NAME)"
+          ports:
+            - name: http
+              containerPort: 5678
+              protocol: TCP
+          env:
+          - name: APP_VERSION
+            value: "1.0.1"
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 5m
+            limits:
+              memory: 64Mi
+              cpu: 20m
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stable-service
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: stable-service
+  template:
+    metadata:
+      labels:
+        app: stable-service
+    spec:
+      containers:
+        - name: http-echo
+          image: hashicorp/http-echo:1.0
+          args:
+          - "-text=Hello from $(POD_NAME)"
+          ports:
+            - name: http
+              containerPort: 5678
+              protocol: TCP
+          env:
+          - name: APP_VERSION
+            value: "1.0.0"
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 5m
+            limits:
+              memory: 64Mi
+              cpu: 20m
