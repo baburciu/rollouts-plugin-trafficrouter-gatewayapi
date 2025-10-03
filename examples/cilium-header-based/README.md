@@ -26,6 +26,7 @@ kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v
 ```
 ```shell
 helm repo add cilium https://helm.cilium.io/
+helm repo add argo https://argoproj.github.io/argo-helm
 helm repo update
 helm install cilium cilium/cilium --version 1.18.2 \
      --namespace kube-system \
@@ -41,24 +42,19 @@ cilium status --wait
 ## Step 3 - Install Argo Rollouts and Argo Rollouts plugin to allow Cilium to manage the traffic
 
 ```shell
-kubectl create namespace argo-rollouts
-kubectl apply -n argo-rollouts -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
-kubectl apply -k https://github.com/argoproj/argo-rollouts/manifests/crds\?ref\=stable
-kubectl apply -f argo-rollouts-plugin.yaml
-kubectl rollout restart deploy -n argo-rollouts
+helm install argo-rollouts argo/argo-rollouts --version 2.40.4 \
+  --namespace argo-rollouts \
+  --create-namespace \
+  --set 'controller.trafficRouterPlugins[0].location=https://github.com/argoproj-labs/rollouts-plugin-trafficrouter-gatewayapi/releases/download/v0.8.0/gatewayapi-plugin-linux-amd64' \
+  --set 'controller.trafficRouterPlugins[0].name=argoproj-labs/gatewayAPI'
 ```
 
-## Step 4 - Grant Argo Rollouts SA access to the HTTPRoute
+## Step 4 - Create the services required for traffic split
+
+Create three Services required for canary based rollout strategy
 
 ```shell
-kubectl apply -f cluster-role.yaml
-```
-__Note:__ These permission are very permissive. You should lock them down according to your needs.
-
-With the following role we allow Argo Rollouts to have Admin access to HTTPRoutes.
-
-```shell
-kubectl apply -f cluster-role-binding.yaml
+kubectl apply -f service.yaml
 ```
 
 ## Step 5 - Create HTTPRoute that defines a traffic split between two services
@@ -69,15 +65,7 @@ Create a GAMMA [producer `HTTPRoute`](https://gateway-api.sigs.k8s.io/concepts/g
 kubectl apply -f httproute.yaml
 ```
 
-## Step 6 - Create the services required for traffic split
-
-Create three Services required for canary based rollout strategy
-
-```shell
-kubectl apply -f service.yaml
-```
-
-## Step 8 - Create an example Rollout
+## Step 6 - Create an example Rollout whose first step is `setHeaderRoute`
 
 Deploy a rollout to get the initial version
 
@@ -85,55 +73,91 @@ Deploy a rollout to get the initial version
 kubectl apply -f rollout.yaml
 ```
 
-## Step 9 - Watch the rollout
-
-Monitor the HTTPRoute configuration to see how traffic is split and header-based routing is configured
-
-```shell
-watch "kubectl get httproute.gateway.networking.k8s.io/argo-rollouts-http-route -o jsonpath='{\" HEADERS: \"}{.spec.rules[*].matches[*]}'"
-```
-
-## Step 10 - Patch the rollout to see the canary deployment
+## Step 7 - Patch the rollout to see the canary deployment
 ```shell
 kubectl patch rollout rollouts-demo --type='json' -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/env/0/value", "value": "1.1.0"}]'
 ```
 
-## Step 11 - Observe the rollout and HTTPRoute rule addition of [canary header matching rule](https://gateway-api.sigs.k8s.io/guides/traffic-splitting/#canary-traffic-rollout)
+## Step 8 - Observe the rollout and HTTPRoute rule addition of [canary header matching rule](https://gateway-api.sigs.k8s.io/guides/traffic-splitting/#canary-traffic-rollout) being dropped
 
+Rollout is in an intermediary step (it is not completed):
 ```shell
-$ kubectl argo rollouts promote rollouts-demo  # promote to Rollout step 1
 $ kubectl argo rollouts get rollout rollouts-demo
 Name:            rollouts-demo
 Namespace:       default
 Status:          ॥ Paused
 Message:         CanaryPauseStep
 Strategy:        Canary
-  Step:          3/5
-  SetWeight:     0
-  ActualWeight:  0
+  Step:          2/5
+  SetWeight:     50
+  ActualWeight:  50
 Images:          hashicorp/http-echo:1.0 (canary, stable)
 Replicas:
   Desired:       5
-  Current:       6
-  Updated:       1
-  Ready:         6
-  Available:     6
+  Current:       8
+  Updated:       3
+  Ready:         8
+  Available:     8
 
-NAME                                       KIND        STATUS     AGE    INFO
-⟳ rollouts-demo                            Rollout     ॥ Paused   9m9s
+NAME                                       KIND        STATUS     AGE  INFO
+⟳ rollouts-demo                            Rollout     ॥ Paused   14m
 ├──# revision:2
-│  └──⧉ rollouts-demo-7bd564d79f           ReplicaSet  ✔ Healthy  8m46s  canary
-│     └──□ rollouts-demo-7bd564d79f-h546k  Pod         ✔ Running  8m25s  ready:1/1
+│  └──⧉ rollouts-demo-7bd564d79f           ReplicaSet  ✔ Healthy  4s   canary
+│     ├──□ rollouts-demo-7bd564d79f-4wwcf  Pod         ✔ Running  4s   ready:1/1
+│     ├──□ rollouts-demo-7bd564d79f-8ltts  Pod         ✔ Running  4s   ready:1/1
+│     └──□ rollouts-demo-7bd564d79f-g85z6  Pod         ✔ Running  4s   ready:1/1
 └──# revision:1
-   └──⧉ rollouts-demo-784858d6db           ReplicaSet  ✔ Healthy  9m9s   stable
-      ├──□ rollouts-demo-784858d6db-2bvqf  Pod         ✔ Running  9m9s   ready:1/1
-      ├──□ rollouts-demo-784858d6db-48qsb  Pod         ✔ Running  9m9s   ready:1/1
-      ├──□ rollouts-demo-784858d6db-fmsrn  Pod         ✔ Running  9m9s   ready:1/1
-      ├──□ rollouts-demo-784858d6db-svp5m  Pod         ✔ Running  9m9s   ready:1/1
-      └──□ rollouts-demo-784858d6db-wv7jr  Pod         ✔ Running  9m9s   ready:1/1
+   └──⧉ rollouts-demo-784858d6db           ReplicaSet  ✔ Healthy  14m  stable
+      ├──□ rollouts-demo-784858d6db-8bqp6  Pod         ✔ Running  14m  ready:1/1
+      ├──□ rollouts-demo-784858d6db-8rx54  Pod         ✔ Running  14m  ready:1/1
+      ├──□ rollouts-demo-784858d6db-kvgjx  Pod         ✔ Running  14m  ready:1/1
+      ├──□ rollouts-demo-784858d6db-mnx79  Pod         ✔ Running  14m  ready:1/1
+      └──□ rollouts-demo-784858d6db-r56wg  Pod         ✔ Running  14m  ready:1/1
 $
+```
+but HTTPRoute header matching rule is not there:
+```shell
 $ kubectl get httproute argo-rollouts-http-route -o yaml | yq .spec.rules
 - backendRefs:
+    - group: core
+      kind: Service
+      name: argo-rollouts-stable-service
+      port: 80
+      weight: 50
+    - group: core
+      kind: Service
+      name: argo-rollouts-canary-service
+      port: 80
+      weight: 50
+  matches:
+    - path:
+        type: PathPrefix
+        value: /
+```
+
+It seems HTTPRoute rule was added and then removed:
+```shell
+$ kubectl get httproute argo-rollouts-http-route -o yaml --watch
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"gateway.networking.k8s.io/v1beta1","kind":"HTTPRoute","metadata":{"annotations":{},"name":"argo-rollouts-http-route","namespace":"default"},"spec":{"parentRefs":[{"group":"core","kind":"Service","name":"argo-rollouts-service","port":80}],"rules":[{"backendRefs":[{"group":"core","kind":"Service","name":"argo-rollouts-stable-service","port":80},{"group":"core","kind":"Service","name":"argo-rollouts-canary-service","port":80}]}]}}
+  creationTimestamp: "2025-10-03T11:10:07Z"
+  generation: 2
+  name: argo-rollouts-http-route
+  namespace: default
+  resourceVersion: "5550"
+  uid: c60e21fa-1faf-4d45-afd5-15cabc698771
+spec:
+  parentRefs:
+  - group: core
+    kind: Service
+    name: argo-rollouts-service
+    port: 80
+  rules:
+  - backendRefs:
     - group: core
       kind: Service
       name: argo-rollouts-stable-service
@@ -144,71 +168,211 @@ $ kubectl get httproute argo-rollouts-http-route -o yaml | yq .spec.rules
       name: argo-rollouts-canary-service
       port: 80
       weight: 0
-  matches:
+    matches:
     - path:
         type: PathPrefix
         value: /
-- backendRefs:
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"gateway.networking.k8s.io/v1beta1","kind":"HTTPRoute","metadata":{"annotations":{},"name":"argo-rollouts-http-route","namespace":"default"},"spec":{"parentRefs":[{"group":"core","kind":"Service","name":"argo-rollouts-service","port":80}],"rules":[{"backendRefs":[{"group":"core","kind":"Service","name":"argo-rollouts-stable-service","port":80},{"group":"core","kind":"Service","name":"argo-rollouts-canary-service","port":80}]}]}}
+  creationTimestamp: "2025-10-03T11:10:07Z"
+  generation: 3
+  name: argo-rollouts-http-route
+  namespace: default
+  resourceVersion: "7504"
+  uid: c60e21fa-1faf-4d45-afd5-15cabc698771
+spec:
+  parentRefs:
+  - group: core
+    kind: Service
+    name: argo-rollouts-service
+    port: 80
+  rules:
+  - backendRefs:
+    - group: core
+      kind: Service
+      name: argo-rollouts-stable-service
+      port: 80
+      weight: 100
+    - group: core
+      kind: Service
+      name: argo-rollouts-canary-service
+      port: 80
+      weight: 0
+    matches:
+    - path:
+        type: PathPrefix
+        value: /
+  - backendRefs:
+    - group: ""
+      kind: Service
+      name: argo-rollouts-canary-service
+      port: 80
+      weight: 1
+    matches:
+    - headers:
+      - name: X-Test
+        type: Exact
+        value: test
+      path:
+        type: PathPrefix
+        value: /
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"gateway.networking.k8s.io/v1beta1","kind":"HTTPRoute","metadata":{"annotations":{},"name":"argo-rollouts-http-route","namespace":"default"},"spec":{"parentRefs":[{"group":"core","kind":"Service","name":"argo-rollouts-service","port":80}],"rules":[{"backendRefs":[{"group":"core","kind":"Service","name":"argo-rollouts-stable-service","port":80},{"group":"core","kind":"Service","name":"argo-rollouts-canary-service","port":80}]}]}}
+  creationTimestamp: "2025-10-03T11:10:07Z"
+  generation: 4
+  name: argo-rollouts-http-route
+  namespace: default
+  resourceVersion: "7506"
+  uid: c60e21fa-1faf-4d45-afd5-15cabc698771
+spec:
+  parentRefs:
+  - group: core
+    kind: Service
+    name: argo-rollouts-service
+    port: 80
+  rules:
+  - backendRefs:
+    - group: core
+      kind: Service
+      name: argo-rollouts-stable-service
+      port: 80
+      weight: 100
+    - group: core
+      kind: Service
+      name: argo-rollouts-canary-service
+      port: 80
+      weight: 0
+    matches:
+    - path:
+        type: PathPrefix
+        value: /
+  - backendRefs:
     - group: ""
       kind: Service
       name: argo-rollouts-canary-service
       port: 80
       weight: 0
-  matches:
+    matches:
     - headers:
-        - name: X-Test
-          type: Exact
-          value: test
+      - name: X-Test
+        type: Exact
+        value: test
       path:
         type: PathPrefix
         value: /
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"gateway.networking.k8s.io/v1beta1","kind":"HTTPRoute","metadata":{"annotations":{},"name":"argo-rollouts-http-route","namespace":"default"},"spec":{"parentRefs":[{"group":"core","kind":"Service","name":"argo-rollouts-service","port":80}],"rules":[{"backendRefs":[{"group":"core","kind":"Service","name":"argo-rollouts-stable-service","port":80},{"group":"core","kind":"Service","name":"argo-rollouts-canary-service","port":80}]}]}}
+  creationTimestamp: "2025-10-03T11:10:07Z"
+  generation: 5
+  name: argo-rollouts-http-route
+  namespace: default
+  resourceVersion: "7510"
+  uid: c60e21fa-1faf-4d45-afd5-15cabc698771
+spec:
+  parentRefs:
+  - group: core
+    kind: Service
+    name: argo-rollouts-service
+    port: 80
+  rules:
+  - backendRefs:
+    - group: core
+      kind: Service
+      name: argo-rollouts-stable-service
+      port: 80
+      weight: 100
+    - group: core
+      kind: Service
+      name: argo-rollouts-canary-service
+      port: 80
+      weight: 0
+    matches:
+    - path:
+        type: PathPrefix
+        value: /
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"gateway.networking.k8s.io/v1beta1","kind":"HTTPRoute","metadata":{"annotations":{},"name":"argo-rollouts-http-route","namespace":"default"},"spec":{"parentRefs":[{"group":"core","kind":"Service","name":"argo-rollouts-service","port":80}],"rules":[{"backendRefs":[{"group":"core","kind":"Service","name":"argo-rollouts-stable-service","port":80},{"group":"core","kind":"Service","name":"argo-rollouts-canary-service","port":80}]}]}}
+  creationTimestamp: "2025-10-03T11:10:07Z"
+  generation: 6
+  name: argo-rollouts-http-route
+  namespace: default
+  resourceVersion: "7568"
+  uid: c60e21fa-1faf-4d45-afd5-15cabc698771
+spec:
+  parentRefs:
+  - group: core
+    kind: Service
+    name: argo-rollouts-service
+    port: 80
+  rules:
+  - backendRefs:
+    - group: core
+      kind: Service
+      name: argo-rollouts-stable-service
+      port: 80
+      weight: 50
+    - group: core
+      kind: Service
+      name: argo-rollouts-canary-service
+      port: 80
+      weight: 50
+    matches:
+    - path:
+        type: PathPrefix
+        value: /
 ```
+
+And we can see it also in the managed routes configmap the plugin writes to:
 ```shell
-$ kubectl run -it --image nicolaka/netshoot:v0.13 network-test -- sh  # run a pod to source curl tests
-~ # # stable K8s service targets any of the 5 stable pods
-~ # curl http://argo-rollouts-stable-service/
-Hello from rollouts-demo-5d78c448f9-l757w
-~ #
-~ # # canary K8s service targets the one canary pod, created for the `setCanaryScale` step in the Rollout
-~ # curl http://argo-rollouts-canary-service/
-Hello from rollouts-demo-8598f766fd-2cvt4
-~ #
-~ # # GAMMA-type HTTPRoute's `.spec.parentRefs` K8s service should only target stable pods since no `setWeight` step is used in the Rollout, but it's not the case in our testing
-~ # seq 1 100 | xargs -P 10 -I {} bash -c 'curl -s http://argo-rollouts-service' > pods.txt
-~ # sort pods.txt | uniq -c | sort -rn
-     23 Hello from rollouts-demo-7bd564d79f-h546k  # <== canary
-     18 Hello from rollouts-demo-784858d6db-wv7jr
-     18 Hello from rollouts-demo-784858d6db-48qsb
-     17 Hello from rollouts-demo-784858d6db-svp5m
-     12 Hello from rollouts-demo-784858d6db-fmsrn
-     12 Hello from rollouts-demo-784858d6db-2bvqf
-~ #
-```
-
-## Step 12 - Test the header-based routing with curl (not working with Cilium v1.8.2 by the look of it)
-
-You can test the header-based routing by sending requests with the specified header.
-With header it should always go to canary only, but we still see stable pods:
-
-```shell
-$ kubectl exec -it network-test -- sh
-~ #
-~ # seq 1 100 | xargs -P 10 -I {} bash -c 'curl -s -H "X-Test: test" http://argo-rollouts-service' > pods.txt
-~ # sort pods.txt | uniq -c | sort -rn
-     21 Hello from rollouts-demo-784858d6db-2bvqf
-     19 Hello from rollouts-demo-7bd564d79f-h546k
-     18 Hello from rollouts-demo-784858d6db-fmsrn
-     16 Hello from rollouts-demo-784858d6db-svp5m
-     15 Hello from rollouts-demo-784858d6db-48qsb
-     11 Hello from rollouts-demo-784858d6db-wv7jr
-~ #
-~ # seq 1 100 | xargs -P 10 -I {} bash -c 'curl -s -H "X-Test: test" http://argo-rollouts-service' > pods.txt
-~ # sort pods.txt | uniq -c | sort -rn
-     19 Hello from rollouts-demo-7bd564d79f-h546k
-     19 Hello from rollouts-demo-784858d6db-wv7jr
-     19 Hello from rollouts-demo-784858d6db-fmsrn
-     15 Hello from rollouts-demo-784858d6db-2bvqf
-     14 Hello from rollouts-demo-784858d6db-svp5m
-     14 Hello from rollouts-demo-784858d6db-48qsb
-~ #
+$ kubectl get cm argo-gatewayapi-configmap -o yaml -w
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  creationTimestamp: "2025-10-03T11:10:20Z"
+  name: argo-gatewayapi-configmap
+  namespace: default
+  resourceVersion: "5420"
+  uid: 56eb3613-7843-49f8-8061-16d40c9fbeac
+---
+apiVersion: v1
+data:
+  httpManagedRoutes: '{"argo-rollouts":{"argo-rollouts-http-route":1}}'
+kind: ConfigMap
+metadata:
+  creationTimestamp: "2025-10-03T11:10:20Z"
+  name: argo-gatewayapi-configmap
+  namespace: default
+  resourceVersion: "7505"
+  uid: 56eb3613-7843-49f8-8061-16d40c9fbeac
+---
+apiVersion: v1
+data:
+  httpManagedRoutes: '{}'
+kind: ConfigMap
+metadata:
+  creationTimestamp: "2025-10-03T11:10:20Z"
+  name: argo-gatewayapi-configmap
+  namespace: default
+  resourceVersion: "7511"
+  uid: 56eb3613-7843-49f8-8061-16d40c9fbeac
 ```
