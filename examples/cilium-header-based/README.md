@@ -344,7 +344,7 @@ spec:
 
 And we can see it also in the managed routes configmap the plugin writes to:
 ```shell
-$ kubectl get cm argo-gatewayapi-configmap -o yaml -w
+$ kubectl get cm argo-gatewayapi-configmap -o yaml --watch
 apiVersion: v1
 kind: ConfigMap
 metadata:
