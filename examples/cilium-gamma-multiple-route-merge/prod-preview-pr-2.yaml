@@ -1,0 +1,123 @@
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: prod-preview-rollouts-demo-pr-2
+  namespace: default
+spec:
+  replicas: 5
+  strategy:
+    canary:
+      canaryService: prod-preview-rollouts-demo-pr-2-canary-service
+      stableService: prod-preview-rollouts-demo-pr-2-stable-service
+      trafficRouting:
+        plugins:
+          argoproj-labs/gatewayAPI:
+            httpRoutes:
+              - name: prod-preview-rollouts-demo-pr-2-http-route
+                # useHeaderRoutes: true
+            namespace: default
+        # managedRoutes:
+        #   - name: argo-rollouts
+      steps:
+        - pause: {}
+        # - setCanaryScale:
+        #     replicas: 1
+        # - setHeaderRoute:
+        #     name: argo-rollouts
+        #     match:
+        #       - headerName: X-Test
+        #         headerValue:
+        #           exact: test
+        # - pause: {}
+        # - setHeaderRoute: # remove header route
+        #     name: argo-rollouts
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: prod-preview-rollouts-demo-pr-2
+  template:
+    metadata:
+      labels:
+        app: prod-preview-rollouts-demo-pr-2
+    spec:
+      containers:
+        - name: http-echo
+          image: hashicorp/http-echo:1.0
+          args:
+          - "-text=Hello from $(POD_NAME)"
+          ports:
+            - name: http
+              containerPort: 5678
+              protocol: TCP
+          env:
+          - name: APP_VERSION
+            value: "1.0.0"
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 5m
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prod-preview-rollouts-demo-pr-2-service
+  namespace: default
+spec:
+  ports:
+    - port: 80
+      targetPort: http
+  selector:
+    app: dummy # dummy selector needed for Cilium, see https://github.com/cilium/cilium/issues/38415
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prod-preview-rollouts-demo-pr-2-canary-service
+  namespace: default
+spec:
+  ports:
+    - port: 80
+      targetPort: http
+  selector:
+    app: prod-preview-rollouts-demo-pr-2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prod-preview-rollouts-demo-pr-2-stable-service
+  namespace: default
+spec:
+  ports:
+    - port: 80
+      targetPort: http
+  selector:
+    app: prod-preview-rollouts-demo-pr-2
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: HTTPRoute
+metadata:
+  name: prod-preview-rollouts-demo-pr-2-http-route
+  namespace: default
+spec:
+  parentRefs:
+    - group: ""
+      name: rollouts-demo-service  # use the same parent svc as the long-running App instance
+      kind: Service
+      port: 80
+  rules:
+    - backendRefs:
+        - name: prod-preview-rollouts-demo-pr-2-stable-service
+          group: ""
+          port: 80
+          kind: Service
+          weight: 80
+        - name: prod-preview-rollouts-demo-pr-2-canary-service
+          group: ""
+          port: 80
+          kind: Service
+          weight: 20

@@ -5,33 +5,33 @@ metadata:
   name: rollouts-demo
   namespace: default
 spec:
-  replicas: 5
+  replicas: 10
   strategy:
     canary:
-      canaryService: argo-rollouts-canary-service
-      stableService: argo-rollouts-stable-service
+      canaryService: rollouts-demo-canary-service
+      stableService: rollouts-demo-stable-service
       trafficRouting:
         plugins:
           argoproj-labs/gatewayAPI:
             httpRoutes:
-              - name: argo-rollouts-http-route
-                useHeaderRoutes: true
+              - name: rollouts-demo-http-route
+                # useHeaderRoutes: true
             namespace: default
-        managedRoutes:
-          - name: argo-rollouts
+        # managedRoutes:
+        #   - name: argo-rollouts
       steps:
         - pause: {}
-        - setCanaryScale:
-            replicas: 1
-        - setHeaderRoute:
-            name: argo-rollouts
-            match:
-              - headerName: X-Test
-                headerValue:
-                  exact: test
-        - pause: {}
-        - setHeaderRoute: # remove header route
-            name: argo-rollouts
+        # - setCanaryScale:
+        #     replicas: 1
+        # - setHeaderRoute:
+        #     name: argo-rollouts
+        #     match:
+        #       - headerName: X-Test
+        #         headerValue:
+        #           exact: test
+        # - pause: {}
+        # - setHeaderRoute: # remove header route
+        #     name: argo-rollouts
   revisionHistoryLimit: 2
   selector:
     matchLabels:
@@ -65,7 +65,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: argo-rollouts-service
+  name: rollouts-demo-service
   namespace: default
 spec:
   ports:
@@ -77,7 +77,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: argo-rollouts-canary-service
+  name: rollouts-demo-canary-service
   namespace: default
 spec:
   ports:
@@ -89,7 +89,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: argo-rollouts-stable-service
+  name: rollouts-demo-stable-service
   namespace: default
 spec:
   ports:
@@ -97,3 +97,27 @@ spec:
       targetPort: http
   selector:
     app: rollouts-demo
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: HTTPRoute
+metadata:
+  name: rollouts-demo-http-route
+  namespace: default
+spec:
+  parentRefs:
+    - group: ""
+      name: rollouts-demo-service
+      kind: Service
+      port: 80
+  rules:
+    - backendRefs:
+        - name: rollouts-demo-stable-service
+          group: ""
+          port: 80
+          kind: Service
+          weight: 80
+        - name: rollouts-demo-canary-service
+          group: ""
+          port: 80
+          kind: Service
+          weight: 20
