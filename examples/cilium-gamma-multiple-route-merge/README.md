@@ -83,7 +83,7 @@ $ kubectl get httproute rollouts-demo-http-route -o yaml | yq .spec.rules
         value: /
 ```
 
-This is expected behavior: the Argo Rollouts controller reconciles the HTTPRoute and overrides the weights based on the current rollout step. On initial deploy (revision 1), all traffic goes to the stable service.
+This is expected behavior: the Argo Rollouts Gateway API plugin [hardcodes the weights to always sum to 100](https://github.com/argoproj-labs/rollouts-plugin-trafficrouter-gatewayapi/blob/v0.13.0/pkg/plugin/httproute.go#L25) (`stable = 100 - canaryWeight`), and on initial deploy (revision 1) all traffic goes to the stable service.
 
 ## Step 6 - Test GAMMA route merging with multiple HTTPRoutes on the same parent service
 
@@ -147,3 +147,51 @@ Aggregating by app instance:
 
 > [!NOTE]
 > **GAMMA route merging splits traffic equally per route, not per pod.** Envoy assigns each merged route's backends the same weight share. The number of replicas behind a service does not affect the inter-route traffic split — it only affects the intra-route round-robin distribution. Adding more HTTPRoutes to the same parent service will dilute each route's share equally (e.g., 4 routes = 25% each).
+
+## Step 7 - Test with plain Deployments to verify that custom weights are respected
+
+Since Argo Rollouts overrides the HTTPRoute weights to always sum to 100, we can verify that Envoy respects custom relative weights by using plain K8s Deployments instead. Each app instance consists of:
+- A `Deployment`
+- A single backend `Service`
+- A GAMMA producer `HTTPRoute` attached to the shared parent service, with a custom `backendRefs[].weight`
+
+The long-running app HTTPRoute uses **weight: 80**, while each PR env uses **weight: 10**:
+
+```shell
+kubectl apply -f deploy-long-running-app.yaml
+kubectl apply -f deploy-preview-pr-1.yaml
+kubectl apply -f deploy-preview-pr-2.yaml
+```
+
+The merged Envoy weighted clusters now reflect the custom weights:
+
+```shell
+$ kubectl get ciliumenvoyconfig rollouts-demo-service -o yaml | yq '.spec.resources[] | select(.["@type"] == "type.googleapis.com/envoy.config.route.v3.RouteConfiguration") | .virtualHosts[0].routes[0].route.weightedClusters'
+clusters:
+  - name: default:rollouts-demo-stable-service:80
+    weight: 80
+  - name: default:prod-preview-rollouts-demo-pr-1-stable-service:80
+    weight: 10
+  - name: default:prod-preview-rollouts-demo-pr-2-stable-service:80
+    weight: 10
+```
+
+Send 100 requests and aggregate by app instance:
+
+```shell
+$ kubectl exec -it network-test -- sh
+~ # seq 1 100 | xargs -P 10 -I {} bash -c 'curl -s http://rollouts-demo-service' > pods.txt
+~ # awk '{print $NF}' pods.txt | sed 's/-[a-z0-9]*-[a-z0-9]*$//' | sort | uniq -c | sort -rn
+     75 rollouts-demo
+     14 prod-preview-rollouts-demo-pr-1
+     11 prod-preview-rollouts-demo-pr-2
+```
+
+| App instance | Replicas | Weight | Expected share | Observed |
+|---|---|---|---|---|
+| Long-running app (`rollouts-demo`) | 10 | 80 | 80% | 75% |
+| PR env 1 (`prod-preview-...-pr-1`) | 5 | 10 | 10% | 14% |
+| PR env 2 (`prod-preview-...-pr-2`) | 5 | 10 | 10% | 11% |
+
+> [!NOTE]
+> **Envoy uses relative weights across merged GAMMA routes.** Setting lower `backendRefs[].weight` values on PR environment HTTPRoutes results in proportionally less traffic. This confirms that a `weightScale` feature in the Argo Rollouts Gateway API plugin could enable the same behavior — by scaling the plugin-managed weights so that PR environments contribute a smaller share to the merged Envoy configuration.
