@@ -60,6 +60,32 @@ Each App instance consists of:
 > [!IMPORTANT]
 > For Cilium the K8s Services refs need to use `HTTPRoute.parentRefs[].group: ""`. This is different than Linkerd, where `group: "core"` could be used.
 
+Each app instance's GAMMA producer HTTPRoute attaches to a parent K8s Service (the frontend anchor with no selector) and splits traffic to its backend Services:
+
+```mermaid
+graph LR
+    Client([Client]) -->|"curl http://rollouts-demo-service"| ParentSvc
+
+    ParentSvc["K8s Service<br/>rollouts-demo-service<br/>(no selector — GAMMA frontend)"]
+
+    ParentSvc -->|"Cilium intercepts<br/>at cluster IP"| HTTPRoute
+
+    HTTPRoute["GAMMA HTTPRoute<br/>rollouts-demo-http-route<br/>parentRef: rollouts-demo-service"]
+
+    HTTPRoute -->|"weight: 80"| StableSvc["K8s Service<br/>rollouts-demo-stable-service"]
+    HTTPRoute -->|"weight: 20"| CanarySvc["K8s Service<br/>rollouts-demo-canary-service"]
+
+    StableSvc --> StablePods["Stable Pods"]
+    CanarySvc --> CanaryPods["Canary Pods"]
+
+    style ParentSvc fill:#7eb3e6,color:#000,stroke:#000
+    style HTTPRoute fill:#b8d4f0,color:#000,stroke:#000
+    style StableSvc fill:#7eb3e6,color:#000,stroke:#000
+    style CanarySvc fill:#ffd700,color:#000,stroke:#000
+    style StablePods fill:#7eb3e6,color:#000,stroke:#000
+    style CanaryPods fill:#ffd700,color:#000,stroke:#000
+```
+
 ## Step 5 - Observe the initial weight ratio set by Argo Rollouts
 
 Even though the GAMMA HTTPRoute is deployed with a 50/50 (or any other) weight split between the stable and canary backend services, Argo Rollouts takes control of the weights during the initial deploy. Since no canary promotion has happened yet, it sets the weight to **100/0** (stable/canary):
@@ -87,7 +113,47 @@ This is expected behavior: the Argo Rollouts Gateway API plugin [hardcodes the w
 
 ## Step 6 - Test GAMMA route merging with multiple HTTPRoutes on the same parent service
 
-When multiple GAMMA producer HTTPRoutes attach to the same parent K8s service (via `spec.parentRefs`), Cilium merges their backend refs into a single Envoy weighted cluster configuration. This can be verified by inspecting the `CiliumEnvoyConfig` that Cilium creates for the parent service:
+When multiple GAMMA producer HTTPRoutes attach to the same parent K8s service (via `spec.parentRefs`), Cilium merges their backend refs into a single Envoy weighted cluster configuration.
+
+```mermaid
+graph TB
+    Client([Client]) -->|"curl http://rollouts-demo-service"| ParentSvc
+
+    ParentSvc["K8s Service<br/>rollouts-demo-service<br/>(no selector — shared GAMMA frontend)"]
+
+    ParentSvc -->|"Cilium intercepts<br/>and merges all HTTPRoutes"| Envoy["Envoy<br/>single weighted cluster<br/>all backends merged"]
+
+    subgraph LR ["Long-running App HTTPRoute"]
+        LRStable["rollouts-demo-stable-service<br/>weight: 100"]
+    end
+
+    subgraph P1 ["PR-1 HTTPRoute"]
+        PR1Stable["pr-1-stable-service<br/>weight: 100"]
+    end
+
+    subgraph P2 ["PR-2 HTTPRoute"]
+        PR2Stable["pr-2-stable-service<br/>weight: 100"]
+    end
+
+    Envoy -->|"100/300 = 33%"| LRStable
+    Envoy -->|"100/300 = 33%"| PR1Stable
+    Envoy -->|"100/300 = 33%"| PR2Stable
+
+    LRStable --> LRPods["10 pods"]
+    PR1Stable --> PR1Pods["5 pods"]
+    PR2Stable --> PR2Pods["5 pods"]
+
+    style ParentSvc fill:#7eb3e6,color:#000,stroke:#000
+    style Envoy fill:#e8a0bf,color:#000,stroke:#000
+    style LRStable fill:#7eb3e6,color:#000,stroke:#000
+    style PR1Stable fill:#ffd700,color:#000,stroke:#000
+    style PR2Stable fill:#ffd700,color:#000,stroke:#000
+    style LRPods fill:#7eb3e6,color:#000,stroke:#000
+    style PR1Pods fill:#ffd700,color:#000,stroke:#000
+    style PR2Pods fill:#ffd700,color:#000,stroke:#000
+```
+
+This can be verified by inspecting the `CiliumEnvoyConfig` that Cilium creates for the parent service:
 
 ```shell
 $ kubectl get ciliumenvoyconfig rollouts-demo-service -o yaml | yq '.spec.resources[] | select(.["@type"] == "type.googleapis.com/envoy.config.route.v3.RouteConfiguration") | .virtualHosts[0].routes[0].route.weightedClusters'
@@ -199,6 +265,50 @@ $ kubectl exec -it network-test -- sh
 ## Step 8 - Hybrid test: Argo Rollout (long-running app) + plain Deployments (PR envs)
 
 In practice, the long-running app would use an Argo `Rollout` (for canary deployments), while the short-lived PR environments could use plain `Deployments` with lower HTTPRoute weights. This creates a hybrid setup:
+
+```mermaid
+graph TB
+    Client([Client]) -->|"curl http://rollouts-demo-service"| ParentSvc
+
+    ParentSvc["K8s Service<br/>rollouts-demo-service<br/>(no selector — shared GAMMA frontend)"]
+
+    ParentSvc -->|"Cilium intercepts<br/>and merges all HTTPRoutes"| Envoy["Envoy<br/>single weighted cluster<br/>total weight: 120"]
+
+    subgraph "Long-running App — Argo Rollout"
+        LRRoute["HTTPRoute<br/>managed by Argo Rollouts plugin<br/>(weights hardcoded to sum 100)"]
+        LRStable["rollouts-demo-stable-service<br/>weight: 100"]
+    end
+
+    subgraph "PR-1 — plain Deployment"
+        PR1Route["HTTPRoute<br/>weight set in YAML<br/>(not managed by Argo Rollouts)"]
+        PR1Stable["pr-1-stable-service<br/>weight: 10"]
+    end
+
+    subgraph "PR-2 — plain Deployment"
+        PR2Route["HTTPRoute<br/>weight set in YAML<br/>(not managed by Argo Rollouts)"]
+        PR2Stable["pr-2-stable-service<br/>weight: 10"]
+    end
+
+    Envoy -->|"100/120 ≈ 83%"| LRStable
+    Envoy -->|"10/120 ≈ 8%"| PR1Stable
+    Envoy -->|"10/120 ≈ 8%"| PR2Stable
+
+    LRStable --> LRPods["10 pods<br/>Rollout-managed"]
+    PR1Stable --> PR1Pods["5 pods<br/>Deployment"]
+    PR2Stable --> PR2Pods["5 pods<br/>Deployment"]
+
+    style ParentSvc fill:#7eb3e6,color:#000,stroke:#000
+    style Envoy fill:#e8a0bf,color:#000,stroke:#000
+    style LRRoute fill:#7eb3e6,color:#000,stroke:#000
+    style LRStable fill:#7eb3e6,color:#000,stroke:#000
+    style PR1Route fill:#ffd700,color:#000,stroke:#000
+    style PR1Stable fill:#ffd700,color:#000,stroke:#000
+    style PR2Route fill:#ffd700,color:#000,stroke:#000
+    style PR2Stable fill:#ffd700,color:#000,stroke:#000
+    style LRPods fill:#7eb3e6,color:#000,stroke:#000
+    style PR1Pods fill:#ffd700,color:#000,stroke:#000
+    style PR2Pods fill:#ffd700,color:#000,stroke:#000
+```
 
 - **Long-running app**: `Rollout` with HTTPRoute managed by the plugin → weights hardcoded to **stable=100, canary=0**
 - **PR env 1**: `Deployment` with HTTPRoute `backendRefs[].weight: 10`
