@@ -195,3 +195,31 @@ $ kubectl exec -it network-test -- sh
 
 > [!NOTE]
 > **Envoy uses relative weights across merged GAMMA routes.** Setting lower `backendRefs[].weight` values on PR environment HTTPRoutes results in proportionally less traffic. This confirms that a `weightScale` feature in the Argo Rollouts Gateway API plugin could enable the same behavior — by scaling the plugin-managed weights so that PR environments contribute a smaller share to the merged Envoy configuration.
+
+## Step 8 - Hybrid test: Argo Rollout (long-running app) + plain Deployments (PR envs)
+
+In practice, the long-running app would use an Argo `Rollout` (for canary deployments), while the short-lived PR environments could use plain `Deployments` with lower HTTPRoute weights. This creates a hybrid setup:
+
+- **Long-running app**: `Rollout` with HTTPRoute managed by the plugin → weights hardcoded to **stable=100, canary=0**
+- **PR env 1**: `Deployment` with HTTPRoute `backendRefs[].weight: 10`
+- **PR env 2**: `Deployment` with HTTPRoute `backendRefs[].weight: 10`
+
+The merged Envoy total weight is **120** (100 + 10 + 10), giving an expected split of ~83%/~8%/~8%:
+
+```shell
+$ kubectl exec -it network-test -- sh
+~ # seq 1 100 | xargs -P 10 -I {} bash -c 'curl -s http://rollouts-demo-service' > pods.txt
+~ # awk '{print $NF}' pods.txt | sed 's/-[a-z0-9]*-[a-z0-9]*$//' | sort | uniq -c | sort -rn
+     80 rollouts-demo
+     14 prod-preview-rollouts-demo-pr-1
+      6 prod-preview-rollouts-demo-pr-2
+```
+
+| App instance | Type | Weight | Expected share | Observed |
+|---|---|---|---|---|
+| Long-running app (`rollouts-demo`) | Rollout | 100 | 83.3% | 80% |
+| PR env 1 (`prod-preview-...-pr-1`) | Deployment | 10 | 8.3% | 14% |
+| PR env 2 (`prod-preview-...-pr-2`) | Deployment | 10 | 8.3% | 6% |
+
+> [!NOTE]
+> **Mixing Rollout-managed and Deployment-backed HTTPRoutes works.** The Rollout's plugin-managed weight of 100 and the Deployment HTTPRoutes' weight of 10 are merged by Cilium into a single Envoy weighted cluster with a total weight of 120. The long-running app receives ~83% of traffic, while each PR environment receives ~8%. This hybrid approach can be used today without any plugin changes — the only requirement is that the PR environment HTTPRoutes are not managed by Argo Rollouts.
